@@ -10,66 +10,45 @@ from transformers import LlamaTokenizerFast
 from llmperf.ray_llm_client import LLMClient
 from llmperf.models import RequestConfig
 from llmperf import common_metrics
-from together import Together
-
-tokenizer = LlamaTokenizerFast.from_pretrained("hf-internal-testing/llama-tokenizer")
 
 tokenizer = LlamaTokenizerFast.from_pretrained("hf-internal-testing/llama-tokenizer")
 
 @ray.remote
-class TogetherAIClient(LLMClient):
-    """Client for Together AI API."""
+class LocalLLMClient(LLMClient):
+    """Client for Local Triton"""
 
     def __init__(self):
-        # Initialize the tokenizer for approximating token count
-        self.tokenizer = LlamaTokenizerFast.from_pretrained("hf-internal-testing/llama-tokenizer")
-        print("DEBUG: TogetherAIClient initialized")
+        pass
 
     def llm_request(self, request_config: RequestConfig) -> Dict[str, Any]:
-        return send_request(request_config)
-
-def send_request(request_config: RequestConfig) -> Dict[str, Any]:
-    api_token = os.environ.get("TOGETHERAI_API_KEY")
-    if not api_token:
-        raise ValueError("The environment variable TOGETHER_API_KEY must be set.")
+        return send_req(request_config)
     
-    # Define the URL for the request
-    url = "https://api.together.xyz/v1/chat/completions"
-    
-    # Define the headers
+def send_req(request_config: RequestConfig) -> Dict[str, Any]:
+    url = "http://localhost:8000/v2/models/ensemble/generate"
     headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
     prompt = request_config.prompt
     prompt, prompt_len = prompt
-    model = request_config.model
+
     time_to_next_token = []
     tokens_received = 0
     ttft = 0
     generated_text = ""
     output_throughput = 0
     total_request_time = 0
+
     metrics = {}
     metrics[common_metrics.ERROR_CODE] = None
     metrics[common_metrics.ERROR_MSG] = ""
+    text_input = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
 
     try:
-        # Define the data payload
-        sampling_params = request_config.sampling_params
         data = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": sampling_params.get("max_new_tokens", 2048),
-            "temperature": sampling_params.get("temperature", 0.7),
-            "top_p": sampling_params.get("top_p", 0.7),
-            "top_k": sampling_params.get("top_k", 50),
-            "repetition_penalty": sampling_params.get("repetition_penalty", 1.0),
-            "stop": sampling_params.get("stop", ["<|eot_id|>","<|eom_id|>"]),
-            "stream": sampling_params.get("stream", False),
-            "stream_tokens": sampling_params.get("stream", False),
-        }  
+            "text_input": text_input,
+            "max_tokens": request_config.sampling_params.get("max_new_tokens", 2048)
+        }
 
         # Make the POST request
         start_time = time.monotonic()
@@ -82,14 +61,10 @@ def send_request(request_config: RequestConfig) -> Dict[str, Any]:
         response_json = response.json()
 
         # Extract the generated text
-        generated_text = response_json['choices'][0]['message']['content']
-
-        print(generated_text)
-
-        print("DEBUG: input data", data)
-        print("DEBUG: generated_text", generated_text)
-
+        generated_text = response_json['text_output']
         tokens_received = len(tokenizer.encode(generated_text))
+        print("DEBUG: data", data)
+        print("DEBUG: generated_text", generated_text)
         print("DEBUG: tokens_received", tokens_received)
         print("DEBUG: total_request_time", total_request_time)
         ttft = -1  # Time to first token; adjust this if your endpoint provides this info
@@ -108,23 +83,20 @@ def send_request(request_config: RequestConfig) -> Dict[str, Any]:
     metrics[common_metrics.E2E_LAT] = total_request_time
     metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = output_throughput
     metrics[common_metrics.NUM_TOTAL_TOKENS] = tokens_received + prompt_len
-    metrics[common_metrics.NUM_OUTPUT_TOKENS] = tokens_received
+    metrics[common_metrics.NUM_OUTPUT_TOKENS] = tokens_received 
     metrics[common_metrics.NUM_INPUT_TOKENS] = prompt_len
 
     return metrics, generated_text, request_config
 
+
 if __name__ == "__main__":
-    request_config = RequestConfig(
-        prompt=("Write a 100-word article on the Benefits of Open-Source in AI research", 10),
-        model="meta-llama/Llama-3-8b-chat-hf",
+    client = LocalLLMClient.remote()
+    request_config_localhost = RequestConfig(
+        prompt=("userHow are you?assistant", 5),
+        model="localhost",
         sampling_params={
-            "temperature": 0.7,
-            "max_new_tokens": 2480,
-            "top_k": 50,
-            "top_p": 0.7,
-            "repetition_penalty": 1.0,
-            "stop": ["<|eot_id|>","<|eom_id|>"]
+            "max_new_tokens": 1024,
         },
     )
-    result = send_request(request_config)
-    print("RESULT:", result)
+    result_localhost = send_req(request_config_localhost)
+    print("RESULT (Localhost):", result_localhost)
